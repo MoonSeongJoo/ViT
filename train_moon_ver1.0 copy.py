@@ -5,8 +5,6 @@ import logging
 import argparse
 import os
 import random
-import math
-import time
 import numpy as np
 
 from datetime import timedelta
@@ -25,7 +23,7 @@ from utils.data_utils_kitti import get_loader
 from utils.dist_util import get_world_size
 
 from losses_Ver9_2_aws import DistancePoints3D, GeometricLoss, L1Loss, ProposedLoss, CombinedLoss
-from quaternion_distances import quaternion_distance
+
 
 logger = logging.getLogger(__name__)
 
@@ -90,15 +88,9 @@ def set_seed(args):
         torch.cuda.manual_seed_all(args.seed)
 
 
-def valid(args, model, writer, test_loader, global_step , loss_fn , n_data_test):
+def valid(args, model, writer, test_loader, global_step):
     # Validation!
-    
-    total_val_loss = 0.
-    total_val_t = 0.
-    total_val_r = 0.
-    local_loss = 0.0
-    
-    # eval_losses = AverageMeter()
+    eval_losses = AverageMeter()
 
     logger.info("***** Running Validation *****")
     logger.info("  Num steps = %d", len(test_loader))
@@ -113,75 +105,39 @@ def valid(args, model, writer, test_loader, global_step , loss_fn , n_data_test)
                           disable=args.local_rank not in [-1, 0])
     loss_fct = torch.nn.CrossEntropyLoss()
     for step, batch in enumerate(epoch_iterator):
-        # batch = tuple(t.to(args.device) for t in batch)
-        # x, y = batch
-        start_time = time.time()
-        rgb_input = []
-        lidar_gt_input = []        
-        
-        # gt pose
-        batch['tr_error'] = batch['tr_error'].cuda()
-        batch['rot_error'] = batch['rot_error'].cuda()
-        
-        for idx in range(len(batch['rgb'])):
-            rgb = batch['rgb'][idx].cuda()
-            # batch stack 
-            rgb_input.append(rgb)
-        rgb_input = torch.stack(rgb_input)    
-        
+        batch = tuple(t.to(args.device) for t in batch)
+        x, y = batch
         with torch.no_grad():
-            # logits = model(x)[0]
-            transl_err , rot_err = model(rgb_input, lidar_gt_input)
-            eval_loss = loss_fn(batch['point_cloud'], batch['tr_error'], batch['rot_error'], transl_err, rot_err)
+            logits = model(x)[0]
 
-            
-            total_trasl_error = torch.tensor(0.0).cuda()
-            # target_transl = torch.tensor(target_transl).cuda()
-            total_rot_error = quaternion_distance(batch['rot_error'], rot_err, batch['rot_error'].device)
-            total_rot_error = total_rot_error * 180. / math.pi
-            for j in range(rgb_input.shape[0]):
-                total_trasl_error += torch.norm(batch['tr_error'][j] - transl_err[j]) * 100.
-        
-        total_val_t += total_trasl_error
-        total_val_r += total_rot_error    
-        local_loss += eval_loss['total_loss'].item()
-        
-        if step % 50 == 0 and step != 0:
-            print('Iter %d val loss = %.3f , time = %.2f' % (step, local_loss/50.,
-                                                                  (time.time() - start_time)/rgb_input.shape[0]))
-            local_loss = 0.0
-        
-        total_val_loss += eval_loss['total_loss'].item() * len(batch['rgb'])
+            eval_loss = loss_fct(logits, y)
+            eval_losses.update(eval_loss.item())
 
-            # eval_loss = loss_fct(logits, y)
-    #         eval_losses.update(eval_loss.item())
+            preds = torch.argmax(logits, dim=-1)
 
-    #         preds = torch.argmax(logits, dim=-1)
+        if len(all_preds) == 0:
+            all_preds.append(preds.detach().cpu().numpy())
+            all_label.append(y.detach().cpu().numpy())
+        else:
+            all_preds[0] = np.append(
+                all_preds[0], preds.detach().cpu().numpy(), axis=0
+            )
+            all_label[0] = np.append(
+                all_label[0], y.detach().cpu().numpy(), axis=0
+            )
+        epoch_iterator.set_description("Validating... (loss=%2.5f)" % eval_losses.val)
 
-    #     if len(all_preds) == 0:
-    #         all_preds.append(preds.detach().cpu().numpy())
-    #         all_label.append(y.detach().cpu().numpy())
-    #     else:
-    #         all_preds[0] = np.append(
-    #             all_preds[0], preds.detach().cpu().numpy(), axis=0
-    #         )
-    #         all_label[0] = np.append(
-    #             all_label[0], y.detach().cpu().numpy(), axis=0
-    #         )
-    #     epoch_iterator.set_description("Validating... (loss=%2.5f)" % eval_losses.val)
-
-    # all_preds, all_label = all_preds[0], all_label[0]
-    # accuracy = simple_accuracy(all_preds, all_label)
+    all_preds, all_label = all_preds[0], all_label[0]
+    accuracy = simple_accuracy(all_preds, all_label)
 
     logger.info("\n")
     logger.info("Validation Results")
     logger.info("Global Steps: %d" % global_step)
-    logger.info("Total Valid Loss: %2.5f" % (total_val_loss / n_data_test))
-    logger.info("total traslation error: %2.5f" % (total_val_t / n_data_test))
-    logger.info("total rotation error: %2.5f" % (total_val_r / n_data_test))
+    logger.info("Valid Loss: %2.5f" % eval_losses.avg)
+    logger.info("Valid Accuracy: %2.5f" % accuracy)
 
-    writer.add_scalar("test/accuracy", scalar_value=(total_val_loss/n_data_test), global_step=global_step)
-    return (total_val_loss / n_data_test)
+    writer.add_scalar("test/accuracy", scalar_value=accuracy, global_step=global_step)
+    return accuracy
 
 
 def train(args, model , loss_fn):
@@ -193,7 +149,7 @@ def train(args, model , loss_fn):
     args.train_batch_size = args.train_batch_size // args.gradient_accumulation_steps
 
     # Prepare dataset
-    train_loader, test_loader ,n_data_train , n_data_test = get_loader(args)
+    train_loader, test_loader = get_loader(args)
 
     # Prepare optimizer and scheduler
     optimizer = torch.optim.SGD(model.parameters(),
@@ -301,7 +257,7 @@ def train(args, model , loss_fn):
                     writer.add_scalar("train/loss", scalar_value=losses.val, global_step=global_step)
                     writer.add_scalar("train/lr", scalar_value=scheduler.get_lr()[0], global_step=global_step)
                 if global_step % args.eval_every == 0 and args.local_rank in [-1, 0]:
-                    accuracy = valid(args, model, writer, test_loader, global_step ,loss_fn , n_data_test)
+                    accuracy = valid(args, model, writer, test_loader, global_step)
                     if best_acc < accuracy:
                         save_model(args, model)
                         best_acc = accuracy

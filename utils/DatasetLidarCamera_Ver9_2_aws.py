@@ -469,7 +469,7 @@ class DatasetLidarCameraKittiOdometry(Dataset):
         
         sbs_img = self.two_images_side_by_side(img_gray, dense_depth_img_np_resized)
         # sbs_img = torch.from_numpy(sbs_img).type(torch.float32)
-        sbs_img = transforms.ToTensor()(sbs_img).type(torch.float32).permute(1,2,0)
+        sbs_img = transforms.ToTensor()(sbs_img).type(torch.float32) #.permute(1,2,0)
         # sbs_img = tvtf.normalize(sbs_img.permute(2,1,0), (0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
 
         ########## corr dataset generation #############################

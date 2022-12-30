@@ -25,7 +25,9 @@ def get_loader(args):
     dataset_val = dataset_class(args.data_folder , max_r=args.max_r, max_t=args.max_t,
                                 split='val', use_reflectance=args.use_reflectance,
                                 val_sequence=args.val_sequence)
-   
+    n_dataset_train = len(dataset_train)
+    n_dataset_val = len(dataset_val)
+    
     if args.local_rank == 0:
         torch.distributed.barrier()
 
@@ -52,7 +54,7 @@ def get_loader(args):
                                                 drop_last=False,
                                                 pin_memory=True) if dataset_val is not None else None
 
-    return train_loader, val_loader
+    return train_loader, val_loader , n_dataset_train , n_dataset_val
 
 # EPOCH = 1
 # def init_fn(worker_id, seed):

@@ -13,6 +13,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 
+import torch.nn.functional as F
 from torch.nn import CrossEntropyLoss, Dropout, Softmax, Linear, Conv2d, LayerNorm
 from torch.nn.modules.utils import _pair
 from scipy import ndimage
@@ -124,7 +125,7 @@ class Mlp(nn.Module):
 class Embeddings(nn.Module):
     """Construct the embeddings from patch, position embeddings.
     """
-    def __init__(self, config, img_size, in_channels=3):
+    def __init__(self, config, img_size, in_channels=1):
         super(Embeddings, self).__init__()
         self.hybrid = None
         img_size = _pair(img_size)
@@ -147,7 +148,8 @@ class Embeddings(nn.Module):
                                        out_channels=config.hidden_size,
                                        kernel_size=patch_size,
                                        stride=patch_size)
-        self.position_embeddings = nn.Parameter(torch.zeros(1, n_patches+1, config.hidden_size))
+        # self.position_embeddings = nn.Parameter(torch.zeros(1, n_patches+1, config.hidden_size))
+        self.position_embeddings = nn.Parameter(torch.zeros(1, 961 , 768))
         self.cls_token = nn.Parameter(torch.zeros(1, 1, config.hidden_size))
 
         self.dropout = Dropout(config.transformer["dropout_rate"])
@@ -267,18 +269,23 @@ class VisionTransformer(nn.Module):
         self.classifier = config.classifier
 
         self.transformer = Transformer(config, img_size, vis)
-        self.head = Linear(config.hidden_size, num_classes)
+        # self.head = Linear(config.hidden_size, num_classes)
+        self.transl = Linear(config.hidden_size, 3)
+        self.rot = Linear(config.hidden_size, 4)
 
     def forward(self, x, labels=None):
         x, attn_weights = self.transformer(x)
-        logits = self.head(x[:, 0])
-
-        if labels is not None:
-            loss_fct = CrossEntropyLoss()
-            loss = loss_fct(logits.view(-1, self.num_classes), labels.view(-1))
-            return loss
-        else:
-            return logits, attn_weights
+        transl = self.transl(x[:, 0])
+        rot = self.rot(x[:, 0])
+        rot = F.normalize(rot, dim=1)
+        
+        return transl , rot 
+        # if labels is not None:
+        #     loss_fct = CrossEntropyLoss()
+        #     loss = loss_fct(logits.view(-1, self.num_classes), labels.view(-1))
+        #     return loss
+        # else:
+        #     return logits, attn_weights
 
     def load_from(self, weights):
         with torch.no_grad():
