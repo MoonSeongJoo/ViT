@@ -21,10 +21,10 @@ from apex.parallel import DistributedDataParallel as DDP
 
 from models.modeling import VisionTransformer, CONFIGS
 from utils.scheduler import WarmupLinearSchedule, WarmupCosineSchedule
-from utils.data_utils_kitti import get_loader
+from utils.data_utils_kitti_ver2_0 import get_loader
 from utils.dist_util import get_world_size
 
-from losses_Ver9_2_aws import DistancePoints3D, GeometricLoss, L1Loss, ProposedLoss, CombinedLoss
+from losses_Ver9_3_aws import DistancePoints3D, GeometricLoss, L1Loss, ProposedLoss, CombinedLoss
 from quaternion_distances import quaternion_distance
 
 logger = logging.getLogger(__name__)
@@ -117,7 +117,8 @@ def valid(args, model, writer, test_loader, global_step , loss_fn , n_data_test)
         # x, y = batch
         start_time = time.time()
         rgb_input = []
-        lidar_gt_input = []        
+        lidar_gt_input = []
+        dense_depth_img_input =[]       
         
         # gt pose
         # batch['tr_error'] = batch['tr_error'].cuda()
@@ -127,13 +128,18 @@ def valid(args, model, writer, test_loader, global_step , loss_fn , n_data_test)
         
         for idx in range(len(batch['rgb'])):
             rgb = batch['rgb'][idx].cuda()
+            dense_depth_img = batch['dense_depth_img'][idx].cuda()
             # batch stack 
             rgb_input.append(rgb)
-        rgb_input = torch.stack(rgb_input)    
+            dense_depth_img_input.append(dense_depth_img)
+        
+        rgb_input = torch.stack(rgb_input)
+        dense_depth_img_input = torch.stack(dense_depth_img_input)
+        sbs_img = torch.cat((rgb_input,dense_depth_img_input),1)    
         
         with torch.no_grad():
             # logits = model(x)[0]
-            transl_err , rot_err = model(rgb_input, lidar_gt_input)
+            transl_err , rot_err = model(sbs_img, lidar_gt_input)
             eval_loss = loss_fn(batch['point_cloud'], target_transl, target_rot, transl_err, rot_err)
 
             
@@ -249,7 +255,7 @@ def train(args, model , loss_fn):
             rgb_input = []
             lidar_gt_input = []
             # corrs_input =[]
-            # dense_depth_img_input =[]
+            dense_depth_img_input =[]
             # pc_rotated_input = []
             
             # gt pose
@@ -260,24 +266,25 @@ def train(args, model , loss_fn):
                 rgb = batch['rgb'][idx].cuda()
                 # lidar_gt = batch['lidar_gt'][idx].cuda()
                 # corrs = batch['corrs'][idx].cuda()
-                # dense_depth_img = batch['dense_depth_img'][idx].cuda()
+                dense_depth_img = batch['dense_depth_img'][idx].cuda()
                 # pc_rotated = batch['pc_rotated'][idx].cuda()
 
                 # batch stack 
                 rgb_input.append(rgb)
                 # lidar_gt_input.append(lidar_gt)
                 # corrs_input.append(corrs)
-                # dense_depth_img_input.append(dense_depth_img)
+                dense_depth_img_input.append(dense_depth_img)
                 # pc_rotated_input.append(pc_rotated)
             
             rgb_input = torch.stack(rgb_input)
             # lidar_gt_input = torch.stack(lidar_gt_input)
             # corrs_input = torch.stack(corrs_input)
             # pc_rotated_input = torch.stack(pc_rotated_input)
-            # dense_depth_img_input = torch.stack(dense_depth_img_input)
+            dense_depth_img_input = torch.stack(dense_depth_img_input)
             # dense_depth_img_input = dense_depth_img_input.permute(0,2,3,1)
+            sbs_img = torch.cat((rgb_input,dense_depth_img_input),1)
             
-            transl_err , rot_err = model(rgb_input, lidar_gt_input)
+            transl_err , rot_err = model(sbs_img, lidar_gt_input)
             loss = loss_fn(batch['point_cloud'], target_trasl, target_rot, transl_err, rot_err)
 
             if args.gradient_accumulation_steps > 1:
@@ -409,7 +416,7 @@ def main():
         "max_t" : 1.5 ,
         "use_reflectance" : False ,
         "val_sequence" : '06' ,
-        "num_worker" : 8 ,
+        "num_worker" : 5 ,
         "rescale_transl" : 2 ,
         "rescale_rot" : 1 ,
         "weight_point_cloud" : 0.4
