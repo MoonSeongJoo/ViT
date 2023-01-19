@@ -8,11 +8,14 @@ import random
 import math
 import time
 import numpy as np
+import mathutils
 
 from datetime import timedelta
 
 import torch
 import torch.distributed as dist
+from torchvision import transforms
+import torch.nn.functional as F
 
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
@@ -21,11 +24,13 @@ from apex.parallel import DistributedDataParallel as DDP
 
 from models.modeling import VisionTransformer, CONFIGS
 from utils.scheduler import WarmupLinearSchedule, WarmupCosineSchedule
-from utils.data_utils_kitti_ver2_0 import get_loader
+from utils.data_utils_kitti_ver3_0 import get_loader
 from utils.dist_util import get_world_size
 
 from losses_Ver9_3_aws import DistancePoints3D, GeometricLoss, L1Loss, ProposedLoss, CombinedLoss
 from quaternion_distances import quaternion_distance
+from image_processing_unit import lidar_project_depth , corr_gen , dense_map , colormap
+from utils.utils import  rotate_back
 
 logger = logging.getLogger(__name__)
 
@@ -112,44 +117,98 @@ def valid(args, model, writer, test_loader, global_step , loss_fn , n_data_test)
                           dynamic_ncols=True,
                           disable=args.local_rank not in [-1, 0])
    
-    for step, batch in enumerate(epoch_iterator):
+    for step, sample in enumerate(epoch_iterator):
         # batch = tuple(t.to(args.device) for t in batch)
         # x, y = batch
         start_time = time.time()
+        lidar_input = []
         rgb_input = []
-        lidar_gt_input = []
-        dense_depth_img_input =[]       
+        lidar_gt = []
+        shape_pad_input = []
+        real_shape_input = []
+        pc_rotated_input = []   
         
         # gt pose
-        # batch['tr_error'] = batch['tr_error'].cuda()
-        # batch['rot_error'] = batch['rot_error'].cuda()
-        target_transl = batch['tr_error'].cuda()
-        target_rot = batch['rot_error'].cuda()
+        sample['tr_error'] = sample['tr_error'].cuda()
+        sample['rot_error'] = sample['rot_error'].cuda()
         
-        for idx in range(len(batch['rgb'])):
-            rgb = batch['rgb'][idx].cuda()
-            dense_depth_img = batch['dense_depth_img'][idx].cuda()
+        for idx in range(len(sample['rgb'])):
+            real_shape = [sample['rgb'][idx].shape[0], sample['rgb'][idx].shape[1], sample['rgb'][idx].shape[2]]
+            rgb = sample['rgb'][idx]
+            rgb = transforms.ToTensor()(rgb)
+            
+            #calibrated point cloud 2d projection
+            pc_lidar = sample['point_cloud'][idx].clone()
+            if args.max_depth < 80.:
+                pc_lidar = pc_lidar[:, pc_lidar[0, :] < args.max_depth].clone()
+            
+            depth_gt, gt_uv , gt_z , gt_points_index  = lidar_project_depth(pc_lidar, sample['calib'][idx], real_shape) # image_shape
+            depth_gt /= args.max_depth
+            
+            # mis-calibrated point cloud 2d projection
+            R = mathutils.Quaternion(sample['rot_error'][idx]).to_matrix()
+            R.resize_4x4()
+            T = mathutils.Matrix.Translation(sample['tr_error'][idx])
+            RT = T @ R
+
+            pc_rotated = rotate_back(sample['point_cloud'][idx], RT) # Pc` = RT * Pc
+            if args.max_depth < 80.:
+                pc_rotated = pc_rotated[:, pc_rotated[0, :] < args.max_depth].clone()
+            
+            depth_img, uv , z, points_index = lidar_project_depth(pc_rotated, sample['calib'][idx], real_shape) # image_shape
+            depth_img /= args.max_depth
+            
+            lidarOnImage = np.hstack([uv, z])
+            dense_depth_img = dense_map(lidarOnImage.T , real_shape[1], real_shape[0] , 8) # argument = (lidarOnImage.T , 1241, 376 , 8)
+            dense_depth_img = dense_depth_img.astype(np.uint8)
+            dense_depth_img_color = colormap(dense_depth_img)
+            dense_depth_img_color = transforms.ToTensor()(dense_depth_img_color).type(dtype=torch.float32)
+            
+            # PAD ONLY ON RIGHT AND BOTTOM SIDE
+            shape_pad = [0, 0, 0, 0]
+
+            shape_pad[3] = (args.img_shape[0] - rgb.shape[1])  # // 2
+            shape_pad[1] = (args.img_shape[1] - rgb.shape[2])  # // 2 + 1
+
+            rgb = F.pad(rgb, shape_pad)
+            # depth_img = F.pad(depth_img, shape_pad)
+            depth_gt = F.pad(depth_gt, shape_pad)
+            dense_depth_img_color = F.pad(dense_depth_img_color, shape_pad)
+            
+            # # corr dataset generation 
+            # corrs = corr_gen(gt_points_index, points_index , gt_uv, uv , args.num_kp)
+            # corrs = corrs            
+            
             # batch stack 
             rgb_input.append(rgb)
-            dense_depth_img_input.append(dense_depth_img)
+            lidar_input.append(dense_depth_img_color)
+            lidar_gt.append(depth_gt)
+            real_shape_input.append(real_shape)
+            shape_pad_input.append(shape_pad)
+            pc_rotated_input.append(pc_rotated)
+            # corrs_input.append(corrs)
         
-        rgb_input = torch.stack(rgb_input)
-        dense_depth_img_input = torch.stack(dense_depth_img_input)
-        dense_depth_img_input = dense_depth_img_input.permute(0,2,3,1)
-        # sbs_img = torch.cat((rgb_input,dense_depth_img_input),1)    
+        lidar_input = torch.stack(lidar_input) # lidar 2d depth map input [256,512,1]
+        rgb_input = torch.stack(rgb_input) # camera input = [256,512,3]
+        rgb_show = rgb_input.clone()
+        lidar_show = lidar_input.clone()
+        rgb_input = F.interpolate(rgb_input, size=[192, 640], mode="bilinear").cuda()
+        lidar_input = F.interpolate(lidar_input, size=[192, 640], mode="bilinear").cuda()
+        # lidar_input = torch.cat((lidar_input,lidar_input,lidar_input), 1)
+        # corrs_input = torch.stack(corrs_input).cuda()   
         
         with torch.no_grad():
             # logits = model(x)[0]
-            transl_err , rot_err = model(rgb_input, dense_depth_img_input)
-            eval_loss = loss_fn(batch['point_cloud'], target_transl, target_rot, transl_err, rot_err)
+            transl_err , rot_err = model(rgb_input, lidar_input)
+            eval_loss = loss_fn(sample['point_cloud'], sample['tr_error'], sample['rot_error'], transl_err, rot_err)
 
             
             total_trasl_error = torch.tensor(0.0).cuda()
             # target_transl = torch.tensor(target_transl).cuda()
-            total_rot_error = quaternion_distance(target_rot, rot_err, target_rot.device)
+            total_rot_error = quaternion_distance(sample['rot_error'], rot_err, sample['rot_error'].device)
             total_rot_error = total_rot_error * 180. / math.pi
             for j in range(rgb_input.shape[0]):
-                total_trasl_error += torch.norm(target_transl[j] - transl_err[j]) * 100.
+                total_trasl_error += torch.norm(sample['tr_error'][j] - transl_err[j]) * 100.
             
             total_err_transl = total_trasl_error.item()
             total_err_rot = total_rot_error.sum().item()
@@ -163,7 +222,7 @@ def valid(args, model, writer, test_loader, global_step , loss_fn , n_data_test)
                                                                   (time.time() - start_time)/rgb_input.shape[0]))
             local_loss = 0.0
         
-        total_val_loss += eval_loss['total_loss'].item() * len(batch['rgb'])
+        total_val_loss += eval_loss['total_loss'].item() * len(sample['rgb'])
 
             # eval_loss = loss_fct(logits, y)
     #         eval_losses.update(eval_loss.item())
@@ -205,8 +264,16 @@ def train(args, model , loss_fn):
     args.train_batch_size = args.train_batch_size // args.gradient_accumulation_steps
 
     # Prepare dataset
-    train_loader, test_loader ,n_data_train , n_data_test = get_loader(args)
-
+    train_loader, test_loader , n_data_train , n_data_test = get_loader(args)
+    
+    args.train_num_batch_data = (n_data_train//args.train_batch_size) + 1 
+    args.eval_num_batch_data =  (n_data_train//args.eval_batch_size) +1
+    
+    logger.info("number of train dataset : %d" % (n_data_train))
+    logger.info("number of valid dataset : %d" % (n_data_test))
+    logger.info("number of train batch data : %d" % (args.train_num_batch_data))
+    logger.info("number of valid batch data : %d" % (args.eval_num_batch_data))
+    
     # Prepare optimizer and scheduler
     optimizer = torch.optim.SGD(model.parameters(),
                                 lr=args.learning_rate,
@@ -248,45 +315,90 @@ def train(args, model , loss_fn):
                               bar_format="{l_bar}{r_bar}",
                               dynamic_ncols=True,
                               disable=args.local_rank not in [-1, 0])
-        for step, batch in enumerate(epoch_iterator):
+        for step, sample in enumerate(epoch_iterator):
             # batch = tuple(t.to(args.device) for t in batch)
             # print(f'batch {step+1}/{len(epoch_iterator)}', end='\r')
             # x, y = batch
             
+            lidar_input = []
             rgb_input = []
-            lidar_gt_input = []
+            lidar_gt = []
+            shape_pad_input = []
+            real_shape_input = []
+            pc_rotated_input = []
             # corrs_input =[]
-            dense_depth_img_input =[]
-            # pc_rotated_input = []
             
             # gt pose
-            target_trasl = batch['tr_error'].cuda()
-            target_rot = batch['rot_error'].cuda()
+            sample['tr_error'] = sample['tr_error'].cuda()
+            sample['rot_error'] = sample['rot_error'].cuda()
             
-            for idx in range(len(batch['rgb'])):
-                rgb = batch['rgb'][idx].cuda()
-                # lidar_gt = batch['lidar_gt'][idx].cuda()
-                # corrs = batch['corrs'][idx].cuda()
-                dense_depth_img = batch['dense_depth_img'][idx].cuda()
-                # pc_rotated = batch['pc_rotated'][idx].cuda()
+            for idx in range(len(sample['rgb'])):
+                real_shape = [sample['rgb'][idx].shape[0], sample['rgb'][idx].shape[1], sample['rgb'][idx].shape[2]]
+                rgb = sample['rgb'][idx]
+                rgb = transforms.ToTensor()(rgb)
+                
+                #calibrated point cloud 2d projection
+                pc_lidar = sample['point_cloud'][idx].clone()
+                if args.max_depth < 80.:
+                    pc_lidar = pc_lidar[:, pc_lidar[0, :] < args.max_depth].clone()
+                
+                depth_gt, gt_uv , gt_z , gt_points_index  = lidar_project_depth(pc_lidar, sample['calib'][idx], real_shape) # image_shape
+                depth_gt /= args.max_depth
+                
+                # mis-calibrated point cloud 2d projection
+                R = mathutils.Quaternion(sample['rot_error'][idx]).to_matrix()
+                R.resize_4x4()
+                T = mathutils.Matrix.Translation(sample['tr_error'][idx])
+                RT = T @ R
 
+                pc_rotated = rotate_back(sample['point_cloud'][idx], RT) # Pc` = RT * Pc
+                if args.max_depth < 80.:
+                    pc_rotated = pc_rotated[:, pc_rotated[0, :] < args.max_depth].clone()
+                
+                depth_img, uv , z, points_index = lidar_project_depth(pc_rotated, sample['calib'][idx], real_shape) # image_shape
+                depth_img /= args.max_depth
+                
+                lidarOnImage = np.hstack([uv, z])
+                dense_depth_img = dense_map(lidarOnImage.T , real_shape[1], real_shape[0] , 8) # argument = (lidarOnImage.T , 1241, 376 , 8)
+                dense_depth_img = dense_depth_img.astype(np.uint8)
+                dense_depth_img_color = colormap(dense_depth_img)
+                dense_depth_img_color = transforms.ToTensor()(dense_depth_img_color).type(dtype=torch.float32)
+                
+                # PAD ONLY ON RIGHT AND BOTTOM SIDE
+                shape_pad = [0, 0, 0, 0]
+
+                shape_pad[3] = (args.img_shape[0] - rgb.shape[1])  # // 2
+                shape_pad[1] = (args.img_shape[1] - rgb.shape[2])  # // 2 + 1
+
+                rgb = F.pad(rgb, shape_pad)
+                # depth_img = F.pad(depth_img, shape_pad)
+                depth_gt = F.pad(depth_gt, shape_pad)
+                dense_depth_img_color = F.pad(dense_depth_img_color, shape_pad)
+                
+                # # corr dataset generation 
+                # corrs = corr_gen(gt_points_index, points_index , gt_uv, uv , args.num_kp)
+                # corrs = corrs
+                
                 # batch stack 
                 rgb_input.append(rgb)
-                # lidar_gt_input.append(lidar_gt)
+                lidar_input.append(dense_depth_img_color)
+                lidar_gt.append(depth_gt)
+                real_shape_input.append(real_shape)
+                shape_pad_input.append(shape_pad)
+                pc_rotated_input.append(pc_rotated)
                 # corrs_input.append(corrs)
-                dense_depth_img_input.append(dense_depth_img)
-                # pc_rotated_input.append(pc_rotated)
             
-            rgb_input = torch.stack(rgb_input)
-            # lidar_gt_input = torch.stack(lidar_gt_input)
-            # corrs_input = torch.stack(corrs_input)
-            # pc_rotated_input = torch.stack(pc_rotated_input)
-            dense_depth_img_input = torch.stack(dense_depth_img_input)
-            dense_depth_img_input = dense_depth_img_input.permute(0,2,3,1)
-            # sbs_img = torch.cat((rgb_input,dense_depth_img_input),1)
+            lidar_input = torch.stack(lidar_input) # lidar 2d depth map input [256,512,1]
+            rgb_input = torch.stack(rgb_input) # camera input = [256,512,3]
+            rgb_show = rgb_input.clone()
+            lidar_show = lidar_input.clone()
+            rgb_input = F.interpolate(rgb_input, size=[192, 640], mode="bilinear").cuda()
+            lidar_input = F.interpolate(lidar_input, size=[192, 640], mode="bilinear").cuda()
+            # lidar_input = torch.cat((lidar_input,lidar_input,lidar_input), 1)
+            # corrs_input = torch.stack(corrs_input).cuda()
             
-            transl_err , rot_err = model(rgb_input, dense_depth_img_input)
-            loss = loss_fn(batch['point_cloud'], target_trasl, target_rot, transl_err, rot_err)
+            transl_err , rot_err = model(rgb_input, lidar_input)
+            loss = loss_fn(sample['point_cloud'], sample['tr_error'], sample['rot_error'], transl_err, rot_err)
 
             if args.gradient_accumulation_steps > 1:
                 loss['total_loss'] = loss['total_loss'] / args.gradient_accumulation_steps
@@ -400,17 +512,17 @@ def main():
         "pretrained_dir" : "checkpoint/ViT-B_16.npz" ,
         "output_dir" : "output" ,
         "name" : "LCCNet_ViT" ,
-        "train_batch_size" : 8 ,
-        "eval_batch_size" : 8 ,
+        "train_batch_size" : 64 ,
+        "eval_batch_size" : 64 ,
         "gradient_accumulation_steps" : 1 ,
-        "learning_rate" : 3e-2 ,
+        "learning_rate" : 3e-4 ,
         "weight_decay" : 0 ,
         "num_steps" : 10000 ,
         "decay_type" : "cosine" ,
         "warmup_steps" : 500 ,
         "eval_every" : 100 ,
         "max_grad_norm" : 1.0 ,
-        "fp16_opt_level" : 'O2' ,
+        "fp16_opt_level" : 'O2',
         "loss_scale" : 0 ,
         "data_folder" : "/home/ubuntu/data/kitti_odometry" ,
         "max_r" : 20.0 ,
@@ -420,8 +532,10 @@ def main():
         "num_worker" : 5 ,
         "rescale_transl" : 2 ,
         "rescale_rot" : 1 ,
-        "weight_point_cloud" : 0.4
-        
+        "weight_point_cloud" : 0.4 ,
+        "max_depth" : 80 ,
+        "img_shape" : (384, 1280) ,
+        "num_kp" : 500
     })
 
     # Setup CUDA, GPU & distributed training

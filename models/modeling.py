@@ -14,13 +14,15 @@ import torch.nn as nn
 import numpy as np
 
 import torch.nn.functional as F
-from torch.nn import CrossEntropyLoss, Dropout, Softmax, Linear, Conv2d, LayerNorm
+from torch.nn import Dropout, Softmax, Linear, Conv2d, LayerNorm
 from torch.nn.modules.utils import _pair
 from scipy import ndimage
 
 import models.configs as configs
 
 from .modeling_resnet import ResNetV2
+from .netvlad import NetVLAD
+from .resnet_encoder import ResnetEncoder
 
 
 logger = logging.getLogger(__name__)
@@ -144,13 +146,18 @@ class Embeddings(nn.Module):
             self.hybrid_model = ResNetV2(block_units=config.resnet.num_layers,
                                          width_factor=config.resnet.width_factor)
             in_channels = self.hybrid_model.width * 16
-        self.patch_embeddings = Conv2d(in_channels=in_channels,
+        # self.patch_embeddings = Conv2d(in_channels=in_channels,
+        #                                out_channels=config.hidden_size,
+        #                                kernel_size=patch_size,
+        #                                stride=patch_size)
+        self.patch_embeddings = Conv2d(in_channels=2,
                                        out_channels=config.hidden_size,
                                        kernel_size=patch_size,
                                        stride=patch_size)
         # self.position_embeddings = nn.Parameter(torch.zeros(1, n_patches+1, config.hidden_size))
-        self.position_embeddings = nn.Parameter(torch.zeros(1, 481 , 768))
+        self.position_embeddings = nn.Parameter(torch.zeros(1, 65 , 768))
         self.cls_token = nn.Parameter(torch.zeros(1, 1, config.hidden_size))
+        # self.cls_token = nn.Parameter(torch.zeros(1, 1, 2))
 
         self.dropout = Dropout(config.transformer["dropout_rate"])
 
@@ -160,6 +167,7 @@ class Embeddings(nn.Module):
 
         if self.hybrid:
             x = self.hybrid_model(x)
+        x = x.view([B,128,128,2]).permute(0,3,1,2)
         x = self.patch_embeddings(x)
         x = x.flatten(2)
         x = x.transpose(-1, -2)
@@ -248,6 +256,19 @@ class Encoder(nn.Module):
         encoded = self.encoder_norm(hidden_states)
         return encoded, attn_weights
 
+class MonoDepth():
+    def __init__(self):
+        self.model_name         = "mono_640x192"
+        self.encoder_path       = "/home/ubuntu/work/autocalib/ViT/models/encoder.pth"
+        
+        self.encoder = ResnetEncoder(18, False)
+        
+        self.loaded_dict_enc = torch.load(self.encoder_path, map_location='cuda')
+        self.filtered_dict_enc = {k: v for k, v in self.loaded_dict_enc.items() if k in self.encoder.state_dict()}
+        self.encoder.load_state_dict(self.filtered_dict_enc)
+        self.encoder.cuda()
+        self.encoder.eval()
+
 
 class Transformer(nn.Module):
     def __init__(self, config, img_size, vis):
@@ -267,14 +288,28 @@ class VisionTransformer(nn.Module):
         self.num_classes = num_classes
         self.zero_head = zero_head
         self.classifier = config.classifier
-
+        
+        self.back_bone = MonoDepth()
+        self.netvlad = NetVLAD(num_clusters=32, dim=512, alpha=1.0)
         self.transformer = Transformer(config, img_size, vis)
         # self.head = Linear(config.hidden_size, num_classes)
         self.transl = Linear(config.hidden_size, 3)
         self.rot = Linear(config.hidden_size, 4)
 
-    def forward(self, x, labels=None):
-        x, attn_weights = self.transformer(x)
+    def forward(self, x, y, labels=None):
+        
+        with torch.no_grad():
+            x = self.back_bone.encoder(x)
+            y = self.back_bone.encoder(y)
+        x1 =x[4]
+        y1 =y[4]
+        
+        x = self.netvlad(x1)
+        y = self.netvlad(y1)
+        # net_vlad_cat = torch.cat((x,y),1)
+        # net_vlad_cat1 = torch.cat((x,y),0)
+        net_vlad_cat2 = torch.stack((x,y),dim=2)
+        x, attn_weights = self.transformer(net_vlad_cat2)
         transl = self.transl(x[:, 0])
         rot = self.rot(x[:, 0])
         rot = F.normalize(rot, dim=1)

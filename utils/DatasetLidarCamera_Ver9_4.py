@@ -21,9 +21,8 @@ from PIL import Image
 from torch.utils.data import Dataset
 from torchvision import transforms
 from sklearn.preprocessing import minmax_scale
-from scipy.spatial import distance
 
-from .utils import invert_pose, rotate_forward, quaternion_from_matrix ,rotate_back #, read_calib_file
+from .utils import invert_pose, rotate_forward #, read_calib_file
 from pykitti import odometry
 import pykitti
 import matplotlib.pyplot as plt
@@ -71,8 +70,19 @@ class DatasetLidarCameraKittiOdometry(Dataset):
         self.K = {}
         self.suf = suf
         self.img_shape =(384,1280)
-        self.num_kp = 500
+        # self.num_kp = 500
         # print ("number of kp = " , self.num_kp)
+        
+        # model_type = "DPT_Large"     # MiDaS v3 - Large     (highest accuracy, slowest inference speed)
+        # # model_type = "DPT_Hybrid"   # MiDaS v3 - Hybrid    (medium accuracy, medium inference speed)
+        # # model_type = "MiDaS_small"  # MiDaS v2.1 - Small   (lowest accuracy, highest inference speed)
+        
+        # midas_transforms = torch.hub.load("intel-isl/MiDaS", "transforms")
+
+        # if model_type == "DPT_Large" or model_type == "DPT_Hybrid":
+        #     self.transform = midas_transforms.dpt_transform
+        # else:
+        #     self.transform = midas_transforms.small_transform
         
         self.all_files = []
         self.sequence_list = ['00', '01', '02', '03', '04', '05', '06', '07', '08', '09', '10',
@@ -182,125 +192,126 @@ class DatasetLidarCameraKittiOdometry(Dataset):
         rgb = to_tensor(rgb)
         rgb = normalization(rgb)
         return rgb
-    def get_2D_lidar_projection(self,pcl, cam_intrinsic):
-        pcl_xyz = cam_intrinsic @ pcl.T
-        pcl_xyz = pcl_xyz.T
-        pcl_z = pcl_xyz[:, 2]
-        pcl_xyz = pcl_xyz / (pcl_xyz[:, 2, None] + 1e-10)
-        pcl_uv = pcl_xyz[:, :2]
 
-        return pcl_uv, pcl_z
+#     def get_2D_lidar_projection(self,pcl, cam_intrinsic):
+#         pcl_xyz = cam_intrinsic @ pcl.T
+#         pcl_xyz = pcl_xyz.T
+#         pcl_z = pcl_xyz[:, 2]
+#         pcl_xyz = pcl_xyz / (pcl_xyz[:, 2, None] + 1e-10)
+#         pcl_uv = pcl_xyz[:, :2]
 
-    def lidar_project_depth(self,pc_rotated, cam_calib, img_shape):
-        pc_rotated = pc_rotated[:3, :].detach().cpu().numpy()
-        #cam_intrinsic = cam_calib.numpy()
-        cam_intrinsic = cam_calib
-        pcl_uv, pcl_z = self.get_2D_lidar_projection(pc_rotated.T, cam_intrinsic)
-        mask = (pcl_uv[:, 0] > 0) & (pcl_uv[:, 0] < img_shape[1]) & (pcl_uv[:, 1] > 0) & (
-                pcl_uv[:, 1] < img_shape[0] ) & (pcl_z > 0)
-        mask1 = (pcl_uv[:, 1] < 188)
-        pcl_uv_no_mask = pcl_uv
-        pcl_z_no_mask = pcl_z
-        pcl_uv = pcl_uv[mask]
-        pcl_z = pcl_z[mask]
-        pcl_uv = pcl_uv.astype(np.uint32)
-        pcl_uv_no_mask  = pcl_uv_no_mask.astype(np.uint32) 
-        pcl_z = pcl_z.reshape(-1, 1)
-        depth_img = np.zeros((img_shape[0], img_shape[1], 1))
-        depth_img[pcl_uv[:, 1], pcl_uv[:, 0]] = pcl_z
-        depth_img = torch.from_numpy(depth_img.astype(np.float32))
-        pcl_uv = torch.from_numpy(pcl_uv.astype(np.float32))
-        pcl_uv_no_mask = torch.from_numpy(pcl_uv_no_mask.astype(np.float32))
-        pcl_z_no_mask = torch.from_numpy(pcl_z_no_mask.astype(np.float32))
-        #depth_img = depth_img.cuda()
-        depth_img = depth_img.permute(2, 0, 1)
-        points_index = np.arange(pcl_uv_no_mask.shape[0])[mask]
-        points_index1 = np.arange(pcl_uv_no_mask.shape[0])[mask1]
+#         return pcl_uv, pcl_z
+
+#     def lidar_project_depth(self,pc_rotated, cam_calib, img_shape):
+#         pc_rotated = pc_rotated[:3, :].detach().cpu().numpy()
+#         #cam_intrinsic = cam_calib.numpy()
+#         cam_intrinsic = cam_calib
+#         pcl_uv, pcl_z = self.get_2D_lidar_projection(pc_rotated.T, cam_intrinsic)
+#         mask = (pcl_uv[:, 0] > 0) & (pcl_uv[:, 0] < img_shape[1]) & (pcl_uv[:, 1] > 0) & (
+#                 pcl_uv[:, 1] < img_shape[0] ) & (pcl_z > 0)
+#         mask1 = (pcl_uv[:, 1] < 188)
+#         pcl_uv_no_mask = pcl_uv
+#         pcl_z_no_mask = pcl_z
+#         pcl_uv = pcl_uv[mask]
+#         pcl_z = pcl_z[mask]
+#         pcl_uv = pcl_uv.astype(np.uint32)
+#         pcl_uv_no_mask  = pcl_uv_no_mask.astype(np.uint32) 
+#         pcl_z = pcl_z.reshape(-1, 1)
+#         depth_img = np.zeros((img_shape[0], img_shape[1], 1))
+#         depth_img[pcl_uv[:, 1], pcl_uv[:, 0]] = pcl_z
+#         depth_img = torch.from_numpy(depth_img.astype(np.float32))
+#         pcl_uv = torch.from_numpy(pcl_uv.astype(np.float32))
+#         pcl_uv_no_mask = torch.from_numpy(pcl_uv_no_mask.astype(np.float32))
+#         pcl_z_no_mask = torch.from_numpy(pcl_z_no_mask.astype(np.float32))
+#         #depth_img = depth_img.cuda()
+#         depth_img = depth_img.permute(2, 0, 1)
+#         points_index = np.arange(pcl_uv_no_mask.shape[0])[mask]
+#         points_index1 = np.arange(pcl_uv_no_mask.shape[0])[mask1]
         
-        return depth_img, pcl_uv , pcl_uv_no_mask , pcl_z , mask , points_index , points_index1
+#         return depth_img, pcl_uv , pcl_uv_no_mask , pcl_z , mask , points_index , points_index1
         
-    def trim_corrs(self, in_corrs):
-        length = in_corrs.shape[0]
-#         print ("number of keypoint before trim : {}".format(length))
-        if length >= self.num_kp:
-            mask = np.random.choice(length, self.num_kp)
-            return in_corrs[mask]
-        else:
-            mask = np.random.choice(length, self.num_kp - length)
-            return np.concatenate([in_corrs, in_corrs[mask]], axis=0)
+#     def trim_corrs(self, in_corrs):
+#         length = in_corrs.shape[0]
+# #         print ("number of keypoint before trim : {}".format(length))
+#         if length >= self.num_kp:
+#             mask = np.random.choice(length, self.num_kp)
+#             return in_corrs[mask]
+#         else:
+#             mask = np.random.choice(length, self.num_kp - length)
+#             return np.concatenate([in_corrs, in_corrs[mask]], axis=0)
 
-    def knn(self, x, y ,k):
-# #         print (" x shape = " , x.shape)
-#         inner = -2*torch.matmul(x.transpose(-2, 1), x)
-#         xx = torch.sum(x**2, dim=1, keepdim=True)
-# #         print (" xx shape = " , x.shape)
-#         pairwise_distance = -xx - inner - xx.transpose(4, 1)
-        pairwise_distance = F.pairwise_distance(x, y)
+#     def knn(self, x, y ,k):
+# # #         print (" x shape = " , x.shape)
+# #         inner = -2*torch.matmul(x.transpose(-2, 1), x)
+# #         xx = torch.sum(x**2, dim=1, keepdim=True)
+# # #         print (" xx shape = " , x.shape)
+# #         pairwise_distance = -xx - inner - xx.transpose(4, 1)
+#         pairwise_distance = F.pairwise_distance(x,y)
 
-        idx = pairwise_distance.topk(k=k, dim=-1)[1]   # (batch_size, num_points, k)
-        return pairwise_distance ,idx
+#         idx = pairwise_distance.topk(k=k, dim=-1)[1]   # (batch_size, num_points, k)
+#         return idx
 
-    def two_images_side_by_side(self, img_a, img_b):
-        assert img_a.shape == img_b.shape, f'{img_a.shape} vs {img_b.shape}'
-        assert img_a.dtype == img_b.dtype
-        h, w, c = img_a.shape
-#         b,h, w, c = img_a.shape
-        canvas = np.zeros((h, 2 * w, c), dtype=img_a.dtype)
-#         canvas = np.zeros((b, h, 2 * w, c), dtype=img_a.dtype)
-        canvas[:, 0 * w:1 * w, :] = img_a
-        canvas[:, 1 * w:2 * w, :] = img_b
-#         canvas = np.zeros((b, h, 2 * w, c), dtype=img_a.cpu().numpy().dtype)
-#         canvas[:, :, 0 * w:1 * w, :] = img_a.cpu().numpy()
-#         canvas[:, :, 1 * w:2 * w, :] = img_b.cpu().numpy()
+#     def two_images_side_by_side(self, img_a, img_b):
+#         assert img_a.shape == img_b.shape, f'{img_a.shape} vs {img_b.shape}'
+#         assert img_a.dtype == img_b.dtype
+#         h, w, c = img_a.shape
+# #         b,h, w, c = img_a.shape
+#         canvas = np.zeros((h, 2 * w, c), dtype=img_a.dtype)
+# #         canvas = np.zeros((b, h, 2 * w, c), dtype=img_a.dtype)
+#         canvas[:, 0 * w:1 * w, :] = img_a
+#         canvas[:, 1 * w:2 * w, :] = img_b
+# #         canvas = np.zeros((b, h, 2 * w, c), dtype=img_a.cpu().numpy().dtype)
+# #         canvas[:, :, 0 * w:1 * w, :] = img_a.cpu().numpy()
+# #         canvas[:, :, 1 * w:2 * w, :] = img_b.cpu().numpy()
 
-        #canvas[:, :, : , 0 * w:1 * w] = img_a.cpu().numpy()
-        #canvas[:, :, : , 1 * w:2 * w] = img_b.cpu().numpy()
-        return canvas
+#         #canvas[:, :, : , 0 * w:1 * w] = img_a.cpu().numpy()
+#         #canvas[:, :, : , 1 * w:2 * w] = img_b.cpu().numpy()
+#         return canvas
     
-    # From Github https://github.com/balcilar/DenseDepthMap
-    def dense_map(self, Pts ,n, m, grid):
-        ng = 2 * grid + 1
+#     # From Github https://github.com/balcilar/DenseDepthMap
+#     def dense_map(self, Pts ,n, m, grid):
+#         ng = 2 * grid + 1
 
-        mX = np.zeros((m,n)) + np.float("inf")
-        mY = np.zeros((m,n)) + np.float("inf")
-        mD = np.zeros((m,n))
-        mX[np.int32(Pts[1]),np.int32(Pts[0])] = Pts[0] - np.round(Pts[0])
-        mY[np.int32(Pts[1]),np.int32(Pts[0])] = Pts[1] - np.round(Pts[1])
-        mD[np.int32(Pts[1]),np.int32(Pts[0])] = Pts[2]
+#         mX = np.zeros((m,n)) + np.float("inf")
+#         mY = np.zeros((m,n)) + np.float("inf")
+#         mD = np.zeros((m,n))
+#         mX[np.int32(Pts[1]),np.int32(Pts[0])] = Pts[0] - np.round(Pts[0])
+#         mY[np.int32(Pts[1]),np.int32(Pts[0])] = Pts[1] - np.round(Pts[1])
+#         mD[np.int32(Pts[1]),np.int32(Pts[0])] = Pts[2]
 
-        KmX = np.zeros((ng, ng, m - ng, n - ng))
-        KmY = np.zeros((ng, ng, m - ng, n - ng))
-        KmD = np.zeros((ng, ng, m - ng, n - ng))
+#         KmX = np.zeros((ng, ng, m - ng, n - ng))
+#         KmY = np.zeros((ng, ng, m - ng, n - ng))
+#         KmD = np.zeros((ng, ng, m - ng, n - ng))
 
-        for i in range(ng):
-            for j in range(ng):
-                KmX[i,j] = mX[i : (m - ng + i), j : (n - ng + j)] - grid - 1 +i
-                KmY[i,j] = mY[i : (m - ng + i), j : (n - ng + j)] - grid - 1 +i
-                KmD[i,j] = mD[i : (m - ng + i), j : (n - ng + j)]
-        S = np.zeros_like(KmD[0,0])
-        Y = np.zeros_like(KmD[0,0])
+#         for i in range(ng):
+#             for j in range(ng):
+#                 KmX[i,j] = mX[i : (m - ng + i), j : (n - ng + j)] - grid - 1 +i
+#                 KmY[i,j] = mY[i : (m - ng + i), j : (n - ng + j)] - grid - 1 +i
+#                 KmD[i,j] = mD[i : (m - ng + i), j : (n - ng + j)]
+#         S = np.zeros_like(KmD[0,0])
+#         Y = np.zeros_like(KmD[0,0])
 
-        for i in range(ng):
-            for j in range(ng):
-                s = 1/np.sqrt(KmX[i,j] * KmX[i,j] + KmY[i,j] * KmY[i,j])
-                Y = Y + s * KmD[i,j]
-                S = S + s
+#         for i in range(ng):
+#             for j in range(ng):
+#                 s = 1/np.sqrt(KmX[i,j] * KmX[i,j] + KmY[i,j] * KmY[i,j])
+#                 Y = Y + s * KmD[i,j]
+#                 S = S + s
 
-        S[S == 0] = 1
-        out = np.zeros((m,n))
-        out[grid + 1 : -grid, grid + 1 : -grid] = Y/S
-        return out 
+#         S[S == 0] = 1
+#         out = np.zeros((m,n))
+#         out[grid + 1 : -grid, grid + 1 : -grid] = Y/S
+#         return out 
     
-    def colormap(self, disp):
-        """"Color mapping for disp -- [H, W] -> [3, H, W]"""
-#         disp_np = disp.cpu().numpy()        # tensor -> numpy
-        disp_np = disp
-        vmax = np.percentile(disp_np, 95)
-        normalizer = mpl.colors.Normalize(vmin=disp_np.min(), vmax=vmax)
-        mapper = cm.ScalarMappable(norm=normalizer, cmap='magma')  #magma, plasma, etc.
-        colormapped_im = (mapper.to_rgba(disp_np)[:, :, :3])
-        return colormapped_im.transpose(2, 0, 1)
-#         return colormapped_im
+#     def colormap(self, disp):
+#         """"Color mapping for disp -- [H, W] -> [3, H, W]"""
+# #         disp_np = disp.cpu().numpy()        # tensor -> numpy
+#         disp_np = disp
+#         vmax = np.percentile(disp_np, 95)
+#         normalizer = mpl.colors.Normalize(vmin=disp_np.min(), vmax=vmax)
+#         mapper = cm.ScalarMappable(norm=normalizer, cmap='magma')  #magma, plasma, etc.
+#         colormapped_im = (mapper.to_rgba(disp_np)[:, :, :3])
+#         return colormapped_im.transpose(2, 0, 1)
+# #         return colormapped_im
     
     def __len__(self):
         return len(self.all_files)
@@ -346,8 +357,8 @@ class DatasetLidarCameraKittiOdometry(Dataset):
         #     pc_in[1, :] *= -1
 
 #         img = Image.open(img_path).convert('RGB')
-        img_bgr = cv2.imread(img_path)
-        img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+        img = cv2.imread(img_path)
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 #         print ('img raw shape' , np.asarray(img).shape)
         
         img_rotation = 0.
@@ -399,144 +410,119 @@ class DatasetLidarCameraKittiOdometry(Dataset):
         T = mathutils.Vector((transl_x, transl_y, transl_z))
 
         R, T = invert_pose(R, T)
-        R_torch, T_torch = torch.tensor(R), torch.tensor(T)
+        R, T = torch.tensor(R), torch.tensor(T)
 
         #io.imshow(depth_img.numpy(), cmap='jet')
         #io.show()
         calib = self.K[seq]
         if h_mirror:
-            calib[2] = (img_rgb.shape[2] / 2)*2 - calib[2]
+            calib[2] = (img.shape[2] / 2)*2 - calib[2]
+            
         
-#         print('img_raw_shape' , img.shape)
-#         img = img.permute(1,2,0)
-#         img_np = img.cpu().numpy()
-#         img_np_resized = cv2.resize(img_np, (640,192), interpolation=cv2.INTER_LINEAR)
+        # img = cv2.resize(img, (640,192), interpolation=cv2.INTER_LINEAR)
+        # img = transforms.ToTensor()(img)
+        
+# #         print('img_raw_shape' , img.shape)
+# #         img = img.permute(1,2,0)
+# #         img_np = img.cpu().numpy()
+# #         img_np_resized = cv2.resize(img_np, (640,192), interpolation=cv2.INTER_LINEAR)
 
-#         fig = plt.figure(figsize=(10,20))
-#         plt.axis('off')
-#         fig=plt.imshow(img_np_resized)
-#         plt.show()
+# #         fig = plt.figure(figsize=(10,20))
+# #         plt.axis('off')
+# #         fig=plt.imshow(img_np_resized)
+# #         plt.show()
          
-        real_shape = [376 , 1241 ,3]
-#         real_shape = img_np_resized.shape
-#         print ('real_shape=' , real_shape)
-#         print('-------- pc_gt shape ----------- ' ,pc_in.shape)
-        depth_gt, gt_uv ,gt_uv_nomask ,gt_z ,gt_mask , gt_points_index , gt_points_index1 = self.lidar_project_depth(pc_in, calib , real_shape) # image_shape
-        depth_gt /= 80.
-#         print('-------- gt_uv shape ----------- ' ,gt_uv.shape)
-#         print(f' gt_uv shape = {gt_uv.shape}', end='gt_uv end \n')        
+#         real_shape = [376 , 1241 ,3]
+# #         real_shape = img_np_resized.shape
+# #         print ('real_shape=' , real_shape)
+# #         print('-------- pc_gt shape ----------- ' ,pc_in.shape)
+#         depth_gt, gt_uv ,gt_uv_nomask ,gt_z ,gt_mask , gt_points_index , gt_points_index1 = self.lidar_project_depth(pc_in, calib , real_shape) # image_shape
+#         depth_gt /= 80.
+# #         print('-------- gt_uv shape ----------- ' ,gt_uv.shape)
+# #         print(f' gt_uv shape = {gt_uv.shape}', end='gt_uv end \n')        
         
-        R = mathutils.Quaternion(R).to_matrix()
-        R.resize_4x4()
-        T = mathutils.Matrix.Translation(T)
-        #RT = T * R
-        RT = T @ R # version change matutils * --> @ 
+#         R = mathutils.Quaternion(R).to_matrix()
+#         R.resize_4x4()
+#         T = mathutils.Matrix.Translation(T)
+#         #RT = T * R
+#         RT = T @ R # version change matutils * --> @ 
 
-        pc_rotated = rotate_back(pc_in, RT) # Pc` = RT * Pc        
+#         pc_rotated = rotate_back(pc_in, RT) # Pc` = RT * Pc        
         
-#         print('-------- pc_rotate shape ----------- ' ,pc_rotated.shape)
-        depth_img, uv , uv_nomask , z , mask , points_index , points_index1 = self.lidar_project_depth(pc_rotated, calib , real_shape) # image_shape
-        depth_img /= 80.
+# #         print('-------- pc_rotate shape ----------- ' ,pc_rotated.shape)
+#         depth_img, uv , uv_nomask , z , mask , points_index , points_index1 = self.lidar_project_depth(pc_rotated, calib , real_shape) # image_shape
+#         depth_img /= 80.
         
-#         print('-------depth_img_shape-------' , depth_img.shape)
-        lidarOnImage = np.hstack([uv, z])
-        dense_depth_img = self.dense_map(lidarOnImage.T , 1241, 376 , 8)
-        dense_depth_img = torch.tensor(dense_depth_img)
+# #         print('-------depth_img_shape-------' , depth_img.shape)
+#         lidarOnImage = np.hstack([uv, z])
+#         dense_depth_img = self.dense_map(lidarOnImage.T , 1241, 376 , 8)
+#         dense_depth_img = torch.tensor(dense_depth_img)
         
-#         rgb_np_resized = img.resize((640, 192), Image.LANCZOS)
-        img_rgb = cv2.resize(img_rgb, (640,192), interpolation=cv2.INTER_LINEAR)
-        rgb_img = transforms.ToTensor()(img_rgb)
-        img_bgr_resized = cv2.resize(img_bgr, (640,192), interpolation=cv2.INTER_LINEAR)
-        img_gray = cv2.cvtColor(img_bgr_resized, cv2.COLOR_BGR2GRAY)
-        img_gray = np.expand_dims(img_gray, axis=0)
-        img_gray = np.transpose(img_gray,(1,2,0))
-        img_gray = transforms.ToTensor()(img_gray)
-        
-#         rgb_img = self.transform(img)
-#         rgb_img = img.resize((1280, 384), Image.LANCZOS)
+# #         rgb_np_resized = img.resize((640, 192), Image.LANCZOS)
+#         img = cv2.resize(img, (640,192), interpolation=cv2.INTER_LINEAR)
+#         rgb_img = transforms.ToTensor()(img)
+# #         rgb_img = self.transform(img)
+# #         rgb_img = img.resize((1280, 384), Image.LANCZOS)
 
-        depth_gt_np = depth_gt.permute(1,2,0)
-        depth_gt_np = depth_gt_np.cpu().numpy()
-        depth_gt_np_resized = cv2.resize(depth_gt_np, (640,192), interpolation=cv2.INTER_LINEAR)
-        depth_img_np = depth_img.permute(1,2,0)
-        depth_img_np = depth_img_np.cpu().numpy()
-        depth_img_np_resized = cv2.resize(depth_gt_np, (640,192), interpolation=cv2.INTER_LINEAR)
-        input_lidar_gt_pytorch = transforms.ToTensor()(depth_gt_np_resized)
-        depth_img_pytorch = transforms.ToTensor()(depth_img_np_resized)
-        # img_pair_distance , img_knn_idx = self.knn(input_lidar_gt_pytorch, depth_img_pytorch, k=1)
+#         depth_gt_np = depth_gt.permute(1,2,0)
+#         depth_gt_np = depth_gt_np.cpu().numpy()
+#         depth_gt_np_resized = cv2.resize(depth_gt_np, (640,192), interpolation=cv2.INTER_LINEAR)
+#         input_lidar_gt_pytorch = transforms.ToTensor()(depth_gt_np_resized)
           
-        # dense_depth_img_np = dense_depth_img.unsqueeze(dim=0).permute(1,2,0)
-        # dense_depth_img_np = dense_depth_img_np.cpu().numpy().astype(np.uint8)
-        # dense_depth_img_np_resized = cv2.resize(dense_depth_img_np, (640,192), interpolation=cv2.INTER_LINEAR)
-        # dense_depth_img_np_resized = np.expand_dims(dense_depth_img_np_resized, axis=0)
-        # dense_depth_img_np_resized = np.transpose(dense_depth_img_np_resized,(1,2,0))
-        # dense_depth_img_np_resized = transforms.ToTensor()(dense_depth_img_np_resized)
-        
-        # dense_depth_img_np_resized_color = self.colormap(dense_depth_img_np_resized)
-        # dense_depth_img= transforms.ToTensor()(dense_depth_img_np_resized_color)
-        
-        
-        dense_depth_img_np = dense_depth_img.unsqueeze(dim=0).permute(1,2,0)
-        dense_depth_img_np = dense_depth_img_np.cpu().numpy().astype(np.uint8)
-        dense_depth_img_np_resized = cv2.resize(dense_depth_img_np, (640,192), interpolation=cv2.INTER_LINEAR)
-        dense_depth_img_np_resized_color = self.colormap(dense_depth_img_np_resized)
-        dense_depth_img= transforms.ToTensor()(dense_depth_img_np_resized_color)
-        
-        # sbs_img = self.two_images_side_by_side(img_gray, dense_depth_img_np_resized)
-        # sbs_img = torch.from_numpy(sbs_img).type(torch.float32)
-        # sbs_img = transforms.ToTensor()(sbs_img).type(torch.float32) #.permute(1,2,0)
-        # sbs_img = tvtf.normalize(sbs_img.permute(2,1,0), (0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
+#         dense_depth_img_np = dense_depth_img.unsqueeze(dim=0).permute(1,2,0)
+#         dense_depth_img_np = dense_depth_img_np.cpu().numpy().astype(np.uint8)
+#         dense_depth_img_np_resized = cv2.resize(dense_depth_img_np, (640,192), interpolation=cv2.INTER_LINEAR)
+#         dense_depth_img_np_resized_color = self.colormap(dense_depth_img_np_resized)
+#         dense_depth_img= transforms.ToTensor()(dense_depth_img_np_resized_color)
 
-        ########## corr dataset generation #############################
+#         ########## corr dataset generation #############################
 
-        inter_gt_uv_mask = np.in1d(gt_points_index , points_index)
-#         inter_gt_uv_mask1 = np.in1d(inter_gt_uv_mask , points_index1)
-        inter_uv_mask    = np.in1d(points_index , gt_points_index)
-#         inter_uv_mask1    = np.in1d(inter_uv_mask , gt_points_index1)
+#         inter_gt_uv_mask = np.in1d(gt_points_index , points_index)
+# #         inter_gt_uv_mask1 = np.in1d(inter_gt_uv_mask , points_index1)
+#         inter_uv_mask    = np.in1d(points_index , gt_points_index)
+# #         inter_uv_mask1    = np.in1d(inter_uv_mask , gt_points_index1)
 
-        gt_uv = gt_uv[inter_gt_uv_mask]
-        uv    = uv[inter_uv_mask]   
+#         gt_uv = gt_uv[inter_gt_uv_mask]
+#         uv    = uv[inter_uv_mask]   
 
-        corrs = np.concatenate([gt_uv, uv], axis=1)
-        corrs = torch.tensor(corrs)
+#         corrs = np.concatenate([gt_uv, uv], axis=1)
+#         corrs = torch.tensor(corrs)
         
-        corrs[:, 0] = (0.5*corrs[:, 0])/1280
-        corrs[:, 1] = (0.5*corrs[:, 1])/384
-        corrs[:, 2] = (0.5*corrs[:, 2])/1280 + 0.5        
-        corrs[:, 3] = (0.5*corrs[:, 3])/384
+#         corrs[:, 0] = (0.5*corrs[:, 0])/1280
+#         corrs[:, 1] = (0.5*corrs[:, 1])/384
+#         corrs[:, 2] = (0.5*corrs[:, 2])/1280 + 0.5        
+#         corrs[:, 3] = (0.5*corrs[:, 3])/384
         
-#         valid_mask = (corrs[:, 1] < 0.5) & (corrs[:, 3] < 0.5) 
-#         corrs = corrs[valid_mask]
-        if corrs.shape[0] <= self.num_kp :
-            corrs = torch.zeros(self.num_kp, 4)
-            corrs[:, 2] = corrs[:, 2] + 0.5
+# #         valid_mask = (corrs[:, 1] < 0.5) & (corrs[:, 3] < 0.5) 
+# #         corrs = corrs[valid_mask]
+#         if corrs.shape[0] <= self.num_kp :
+#             corrs = torch.zeros(self.num_kp, 4)
+#             corrs[:, 2] = corrs[:, 2] + 0.5
         
-#         corrs = self.trim_corrs(corrs) # random 2d point-cloud trim
-        p_distance , corrs_knn_idx = self.knn(corrs[:,:2], corrs[:,2:], self.num_kp) # knn 2d point-cloud trim
-        corrs = corrs[corrs_knn_idx]
-#         print ("knn corrs shape = " , corrs.shape)
+# #         corrs = self.trim_corrs(corrs) # random 2d point-cloud trim
+#         corrs_knn_idx = self.knn(corrs[:,:2], corrs[:,2:], self.num_kp) # knn 2d point-cloud trim
+#         corrs = corrs[corrs_knn_idx]
+# #         print ("knn corrs shape = " , corrs.shape)
 
-        assert (0.0 <= corrs[:, 0]).all() and (corrs[:, 0] <= 0.5).all()
-        assert (0.0 <= corrs[:, 1]).all() and (corrs[:, 1] <= 1.0).all()
-        assert (0.5 <= corrs[:, 2]).all() and (corrs[:, 2] <= 1.0).all()
-        assert (0.0 <= corrs[:, 3]).all() and (corrs[:, 3] <= 1.0).all()         
-#         print ("corrs_MinMax_scaled_value =" , np.max(corrs) )
-#         corrs -= corrs.min()
-#         corrs /= corrs.max()
-#         print ("-------corrs_max---------" , np.max(corrs[:,3]))
+#         assert (0.0 <= corrs[:, 0]).all() and (corrs[:, 0] <= 0.5).all()
+#         assert (0.0 <= corrs[:, 1]).all() and (corrs[:, 1] <= 1.0).all()
+#         assert (0.5 <= corrs[:, 2]).all() and (corrs[:, 2] <= 1.0).all()
+#         assert (0.0 <= corrs[:, 3]).all() and (corrs[:, 3] <= 1.0).all()         
+# #         print ("corrs_MinMax_scaled_value =" , np.max(corrs) )
+# #         corrs -= corrs.min()
+# #         corrs /= corrs.max()
+# #         print ("-------corrs_max---------" , np.max(corrs[:,3]))
         
         if self.split == 'test':
-            sample = {'rgb': rgb_img, 'point_cloud': pc_in, 'calib': calib,
-                      'tr_error': T_torch, 'rot_error': R_torch, 'seq': int(seq), 'img_path': img_path,
+            sample = {'rgb': img, 'point_cloud': pc_in, 'calib': calib,
+                      'tr_error': T, 'rot_error': R, 'seq': int(seq), 'img_path': img_path,
                       'rgb_name': rgb_name + '.png', 'item': item, 'extrin': RT_torch,
-                      'initial_RT': initial_RT , 'corrs' : corrs , 'pc_rotated' : pc_rotated , 'lidar_gt' : input_lidar_gt_pytorch,
-                      'dense_depth_img' : dense_depth_img}
+                      'initial_RT': initial_RT }
         else:
-            sample = {'rgb': rgb_img, 'point_cloud': pc_in, 'calib': calib,
-                      'tr_error': T_torch, 'rot_error': R_torch, 'seq': int(seq),
+            sample = {'rgb': img, 'point_cloud': pc_in, 'calib': calib,
+                      'tr_error': T, 'rot_error': R, 'seq': int(seq),
                       'rgb_name': rgb_name, 'item': item, 'extrin': RT_torch , 
-                      'corrs' : corrs , 'pc_rotated' : pc_rotated , 'lidar_gt' : input_lidar_gt_pytorch,
-                      'dense_depth_img' : dense_depth_img}
+                      }
 
         return sample
 
