@@ -159,7 +159,7 @@ def valid(args, model, writer, test_loader, global_step , loss_fn , n_data_test)
             depth_img /= args.max_depth
             
             lidarOnImage = np.hstack([uv, z])
-            dense_depth_img = dense_map(lidarOnImage.T , real_shape[1], real_shape[0] , 8) # argument = (lidarOnImage.T , 1241, 376 , 8)
+            dense_depth_img = dense_map(lidarOnImage.T , real_shape[1], real_shape[0] , 2) # argument = (lidarOnImage.T , 1241, 376 , 8)
             dense_depth_img = dense_depth_img.astype(np.uint8)
             dense_depth_img_color = colormap(dense_depth_img)
             dense_depth_img_color = transforms.ToTensor()(dense_depth_img_color).type(dtype=torch.float32)
@@ -359,7 +359,7 @@ def train(args, model , loss_fn):
                 depth_img /= args.max_depth
                 
                 lidarOnImage = np.hstack([uv, z])
-                dense_depth_img = dense_map(lidarOnImage.T , real_shape[1], real_shape[0] , 8) # argument = (lidarOnImage.T , 1241, 376 , 8)
+                dense_depth_img = dense_map(lidarOnImage.T , real_shape[1], real_shape[0] , 2) # argument = (lidarOnImage.T , 1241, 376 , 8)
                 dense_depth_img = dense_depth_img.astype(np.uint8)
                 dense_depth_img_color = colormap(dense_depth_img)
                 dense_depth_img_color = transforms.ToTensor()(dense_depth_img_color).type(dtype=torch.float32)
